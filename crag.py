@@ -8,7 +8,8 @@ from datetime import datetime
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain.schema import HumanMessage, SystemMessage
+
 from PyPDF2 import PdfReader
 from dotenv import load_dotenv
 from sklearn.metrics.pairwise import cosine_similarity
@@ -24,6 +25,13 @@ logger = logging.getLogger(__name__)
 # -----------------------------
 load_dotenv()
 app = FastAPI(title="Enhanced PDF RAG Health Assistant")
+@app.get("/")
+@app.get("/HELLO")
+async def root():
+    return {"message": "Hello! The Enhanced PDF RAG Health Assistant is running."}
+
+
+
 
 # -----------------------------
 # Configuration
@@ -276,6 +284,10 @@ async def upload_pdf(file: UploadFile = File(...)):
     except Exception as e:
         logger.error(f"Error uploading PDF: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+    # Prepare context with source information
+
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
 
 @app.post("/ask")
 async def ask_question(request: dict):
@@ -286,39 +298,43 @@ async def ask_question(request: dict):
             raise HTTPException(status_code=400, detail="Question cannot be empty")
         
         # Search for relevant documents
-        relevant_docs = await vector_db.similarity_search(question, k=Config.MAX_RETRIEVAL_DOCS)
+        relevant_docs = await vector_db.similarity_search(
+            question, k=Config.MAX_RETRIEVAL_DOCS
+        )
         
         if not relevant_docs:
-            return {
-                "response": "I'm sorry, I couldn't find relevant information in the uploaded documents to answer your question.",
-                "sources": []
-            }
-        
-        # Prepare context with source information
+            return JSONResponse(
+                content=jsonable_encoder({
+                    "response": "I'm sorry, I couldn't find relevant information in the uploaded documents to answer your question.",
+                    "sources": []
+                })
+            )
+
+        # Prepare context and sources
         context_parts = []
         sources = []
-        
+
         for doc in relevant_docs:
-            context_parts.append(f"[Source: {doc['source']}, Page: {doc['page_number']}]\n{doc['text']}")
+            context_parts.append(
+                f"[Source: {doc['source']}, Page: {int(doc['page_number'])}]\n{doc['text']}"
+            )
             sources.append({
                 "source": doc['source'],
-                "page": doc['page_number'],
-                "similarity": round(doc['similarity'], 3)
+                "page": int(doc['page_number']),  # Convert to native int
+                "similarity": float(round(doc['similarity'], 3))  # Convert to float
             })
         
         context = "\n\n---\n\n".join(context_parts)
         
-        # Enhanced system prompt
+        # System prompt
         system_prompt = """You are a knowledgeable and helpful medical assistant. 
-        
-        Guidelines:
-        1. Use ONLY the information provided in the context below
-        2. Be accurate and cite specific sources when possible
-        3. If the information is not in the context, clearly state so
-        4. Maintain a professional yet friendly tone
-        5. If medical advice is requested, remind users to consult healthcare professionals
-        
-        Always structure your response clearly and mention relevant sources."""
+Guidelines:
+1. Use ONLY the information provided in the context below
+2. Be accurate and cite specific sources when possible
+3. If the information is not in the context, clearly state so
+4. Maintain a professional yet friendly tone
+5. If medical advice is requested, remind users to consult healthcare professionals
+Always structure your response clearly and mention relevant sources."""
         
         messages = [
             SystemMessage(content=system_prompt),
@@ -329,25 +345,41 @@ async def ask_question(request: dict):
         response = await chat_client.agenerate(messages=[messages])
         answer = response.generations[0][0].text
         
-        return {
-            "response": answer,
-            "sources": sources,
-            "context_chunks_used": len(relevant_docs)
-        }
-    
+        return JSONResponse(
+            content=jsonable_encoder({
+                "response": answer,
+                "sources": sources,
+                "context_chunks_used": len(relevant_docs)
+            })
+        )
+
     except Exception as e:
         logger.error(f"Error generating response: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to generate response: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate response: {str(e)}"
+        )
+
 
 @app.get("/stats")
 async def get_stats():
     """Get database statistics"""
     try:
         stats = vector_db.get_document_stats()
-        return stats
+        stats['total_chunks'] = int(stats['total_chunks'])  # convert numpy to int
+        stats['documents'] = {str(k): int(v) for k, v in stats['documents'].items()}  # convert numpy to int
+        stats['latest_upload'] = str(stats.get('latest_upload'))  # ensure string type
+
+        return JSONResponse(content=jsonable_encoder(stats))
+
     except Exception as e:
         logger.error(f"Error getting stats: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to get statistics")
+
+   
+
+   
+    
 
 @app.delete("/clear-database")
 async def clear_database():
